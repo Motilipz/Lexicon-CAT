@@ -1,0 +1,8 @@
+{
+  "name": "CAT Vocabulary Learning Dictionary",
+  "description": "A comprehensive, high-utility vocabulary learning system optimized for CAT preparation with spaced repetition, Anki-style memory confidence tracking, root-word analysis, Reading Mode, and server-side Gemini API word profiling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
