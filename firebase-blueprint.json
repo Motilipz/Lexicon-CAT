@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "user": {
+      "title": "User Profile",
+      "description": "User learning statistics and goal settings",
+      "type": "object",
+      "properties": {
+        "todayGoal": { "type": "number" },
+        "currentStreak": { "type": "number" },
+        "maxStreak": { "type": "number" },
+        "lastStudyDate": { "type": "string" },
+        "retentionRate": { "type": "number" },
+        "quizAccuracy": { "type": "number" },
+        "totalQuizzesTaken": { "type": "number" },
+        "totalWordsReviewed": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["todayGoal", "currentStreak", "maxStreak"]
+    },
+    "wordProgress": {
+      "title": "Word Progress",
+      "description": "Spaced repetition statistics and learning state for a single vocabulary word",
+      "type": "object",
+      "properties": {
+        "word": { "type": "string" },
+        "confidence": { "type": "string", "enum": ["perfect", "good", "unsure", "forgot"] },
+        "nextReviewDate": { "type": "string" },
+        "intervalDays": { "type": "number" },
+        "streak": { "type": "number" },
+        "lastReviewed": { "type": "string" },
+        "notes": { "type": "string" },
+        "tags": { "type": "array" },
+        "bookmarked": { "type": "boolean" }
+      },
+      "required": ["word", "confidence", "nextReviewDate"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "user" },
+      "description": "User profile containing overall statistics"
+    },
+    "/users/{userId}/progress/{wordId}": {
+      "schema": { "$ref": "wordProgress" },
+      "description": "Spaced repetition loop logs for the user's studied words"
+    }
+  }
+}

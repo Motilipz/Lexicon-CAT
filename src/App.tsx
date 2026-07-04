@@ -6,6 +6,10 @@ import WordCard from './components/WordCard';
 import QuizEngine from './components/QuizEngine';
 import ReadingMode from './components/ReadingMode';
 import WordDetailModal from './components/WordDetailModal';
+import AuthModal from './components/AuthModal';
+import { auth, db } from './lib/firebase';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { Cloud, CloudOff, CloudLightning } from 'lucide-react';
 import { 
   Award, 
   BookOpen, 
@@ -28,6 +32,8 @@ export default function App() {
   // --- STATE DECLARATIONS ---
   const [dictionary, setDictionary] = useState<Word[]>([]);
   const [progress, setProgress] = useState<{ [word: string]: UserWordProgress }>({});
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [stats, setStats] = useState<UserStats>({
     todayGoal: 15,
     currentStreak: 0,
@@ -137,6 +143,98 @@ export default function App() {
     }
   }, []);
 
+  // Firebase Authentication state listener & real-time auto restoration
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      setFirebaseUser(u);
+      if (u) {
+        // Automatically fetch and synchronize latest cloud backup
+        try {
+          const { doc, getDoc, collection, getDocs } = await import('firebase/firestore');
+          const userDocRef = doc(db, 'users', u.uid);
+          const userSnap = await getDoc(userDocRef);
+          
+          let cloudStats: UserStats | null = null;
+          if (userSnap.exists()) {
+            cloudStats = userSnap.data() as UserStats;
+            setStats(cloudStats);
+            localStorage.setItem('cat_stats', JSON.stringify(cloudStats));
+          }
+
+          const progressMap: { [word: string]: UserWordProgress } = {};
+          const progressCollRef = collection(db, 'users', u.uid, 'progress');
+          const querySnap = await getDocs(progressCollRef);
+          querySnap.forEach((doc) => {
+            progressMap[doc.id] = doc.data() as UserWordProgress;
+          });
+
+          if (Object.keys(progressMap).length > 0) {
+            setProgress(progressMap);
+            localStorage.setItem('cat_progress', JSON.stringify(progressMap));
+          }
+
+          // Trigger a silent rotation update based on newly merged records
+          const todayStr = new Date().toISOString().split('T')[0];
+          rollDailyList(dictionary, progressMap, cloudStats || stats, todayStr);
+        } catch (e) {
+          console.error("Failed to automatically synchronize cloud backup on boot:", e);
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [dictionary]);
+
+  // Cloud synchronization helpers
+  const syncProgressToCloud = async (wordName: string, item: UserWordProgress) => {
+    if (auth.currentUser) {
+      try {
+        const { doc, setDoc } = await import('firebase/firestore');
+        await setDoc(doc(db, 'users', auth.currentUser.uid, 'progress', wordName), item);
+      } catch (e) {
+        console.error("Cloud progress sync failed:", e);
+      }
+    }
+  };
+
+  const syncStatsToCloud = async (newStats: UserStats) => {
+    if (auth.currentUser) {
+      try {
+        const { doc, setDoc } = await import('firebase/firestore');
+        await setDoc(doc(db, 'users', auth.currentUser.uid), {
+          ...newStats,
+          updatedAt: new Date().toISOString()
+        });
+      } catch (e) {
+        console.error("Cloud stats sync failed:", e);
+      }
+    }
+  };
+
+  const handleLoginSuccess = (
+    uid: string, 
+    fetchedStats: UserStats, 
+    fetchedProgress: { [word: string]: UserWordProgress }
+  ) => {
+    setStats(fetchedStats);
+    setProgress(fetchedProgress);
+    localStorage.setItem('cat_stats', JSON.stringify(fetchedStats));
+    localStorage.setItem('cat_progress', JSON.stringify(fetchedProgress));
+    
+    // Rotate today's words list relative to the recovered profile
+    rollDailyList(dictionary, fetchedProgress, fetchedStats, new Date().toISOString().split('T')[0]);
+  };
+
+  const handleLogout = async () => {
+    if (confirm("Are you sure you want to log out from LEXICON CAT? Your progress will remain saved on this local browser session.")) {
+      try {
+        await signOut(auth);
+        setFirebaseUser(null);
+      } catch (e) {
+        console.error("Sign out failed:", e);
+      }
+    }
+  };
+
   // --- CORE METHODS ---
 
   // Select 15 words for the daily queue
@@ -173,6 +271,7 @@ export default function App() {
     };
     setStats(updatedStats);
     localStorage.setItem('cat_stats', JSON.stringify(updatedStats));
+    syncStatsToCloud(updatedStats);
 
     // 2. Prioritize words:
     // Priority A: Words due for Spaced Repetition today (nextReviewDate <= today)
@@ -247,6 +346,7 @@ export default function App() {
     const newProgress = { ...progress, [wordName]: updatedProg };
     setProgress(newProgress);
     localStorage.setItem('cat_progress', JSON.stringify(newProgress));
+    syncProgressToCloud(wordName, updatedProg);
 
     // Update stats studied count
     const totalStudied = Object.keys(newProgress).length;
@@ -257,6 +357,7 @@ export default function App() {
     };
     setStats(updatedStats);
     localStorage.setItem('cat_stats', JSON.stringify(updatedStats));
+    syncStatsToCloud(updatedStats);
 
     // Simple audio sound / visual confirmation
     if (currentTab === 'daily' && dailyIdx < dailyWords.length - 1) {
@@ -283,6 +384,7 @@ export default function App() {
     const newProgress = { ...progress, [wordName]: updatedProg };
     setProgress(newProgress);
     localStorage.setItem('cat_progress', JSON.stringify(newProgress));
+    syncProgressToCloud(wordName, updatedProg);
   };
 
   // Edit custom tags or notes
@@ -303,6 +405,7 @@ export default function App() {
     const newProgress = { ...progress, [wordName]: updatedProg };
     setProgress(newProgress);
     localStorage.setItem('cat_progress', JSON.stringify(newProgress));
+    syncProgressToCloud(wordName, updatedProg);
   };
 
   // Save dynamically analyzed quick word
@@ -335,6 +438,7 @@ export default function App() {
     const updatedProg = { ...progress, [newWord.word]: initProg };
     setProgress(updatedProg);
     localStorage.setItem('cat_progress', JSON.stringify(updatedProg));
+    syncProgressToCloud(newWord.word, initProg);
 
     // Inject to today's daily queue so they can review it immediately!
     if (!dailyWords.some(w => w.word.toLowerCase() === lowercaseWord)) {
@@ -489,6 +593,7 @@ export default function App() {
     };
     setStats(updated);
     localStorage.setItem('cat_stats', JSON.stringify(updated));
+    syncStatsToCloud(updated);
   };
 
   // --- FILTRATION CALCULATIONS ---
@@ -564,6 +669,30 @@ export default function App() {
 
           {/* Quick Streak Widget & Goal Progress */}
           <div className="flex items-center gap-6">
+            {/* Cloud Sync Status Widget */}
+            {firebaseUser ? (
+              <div className="flex items-center gap-2 px-2.5 py-1 bg-emerald-50 border border-emerald-200 rounded-sm">
+                <Cloud className="text-emerald-600 shrink-0" size={14} />
+                <span className="text-[10px] font-mono font-bold text-emerald-800 tracking-tight uppercase max-w-[80px] sm:max-w-[110px] truncate" title={firebaseUser.email || ""}>
+                  Synced: {firebaseUser.displayName || firebaseUser.email?.split('@')[0]}
+                </span>
+                <button 
+                  onClick={handleLogout}
+                  className="text-[9px] font-mono font-bold text-zinc-500 hover:text-red-700 uppercase tracking-tight ml-1 hover:underline cursor-pointer"
+                >
+                  [Log out]
+                </button>
+              </div>
+            ) : (
+              <button 
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-sm transition-colors text-amber-800 font-mono font-bold text-[10px] uppercase tracking-wider cursor-pointer"
+              >
+                <CloudOff size={14} className="text-amber-650 animate-pulse" />
+                <span>Sync Account</span>
+              </button>
+            )}
+
             {stats.currentStreak > 0 && (
               <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 bg-[#F3F1ED] border border-[#E5E1DA] rounded-sm">
                 <Flame className="text-orange-600 fill-orange-500" size={14} />
@@ -1019,6 +1148,16 @@ export default function App() {
           onBookmarkToggle={handleBookmarkToggle}
           onRateConfidence={handleRateConfidence}
           onAddNote={handleAddNote}
+        />
+      )}
+
+      {/* CLOUD AUTHENTICATION MODAL */}
+      {showAuthModal && (
+        <AuthModal
+          onClose={() => setShowAuthModal(false)}
+          onLoginSuccess={handleLoginSuccess}
+          localStats={stats}
+          localProgress={progress}
         />
       )}
 
