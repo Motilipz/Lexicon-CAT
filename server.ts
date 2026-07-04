@@ -194,6 +194,64 @@ const analyzeWordHandler = async (req: express.Request, res: express.Response) =
 apiRouter.post("/gemini/analyze-word", analyzeWordHandler);
 apiRouter.post("/gemini/quick-lookup", analyzeWordHandler);
 
+// API Endpoint: Generate customized 15-word daily lists
+apiRouter.post("/gemini/generate-daily-list", async (req, res) => {
+  const { studiedWords, weakCategories } = req.body;
+  if (!ai) {
+    return res.status(500).json({
+      error: "Gemini API key is not configured.",
+    });
+  }
+
+  try {
+    const prompt = `Generate an advanced vocabulary daily list of exactly 15 high-frequency English words curated specifically for CAT (Common Admission Test) or GMAT preparation.
+    
+    Context and Requirements:
+    - We want a personalized list of 15 diverse and sophisticated words.
+    ${studiedWords && studiedWords.length > 0 ? `- EXCLUDE these recently studied/known words: ${studiedWords.join(", ")}.` : ""}
+    ${weakCategories && weakCategories.length > 0 ? `- Focus especially on these weak categories/domains: ${weakCategories.join(", ")}.` : "- Include a balanced selection of categories: Business, Economics, Psychology, Politics, Philosophy, Science, Law, History, Technology, Environment, Society, Education, Literature, or CAT High Frequency."}
+
+    For each word in the list, you must provide a deep, rich, comprehensive CAT-focused profile matching the expected word schema structure:
+    - Provide accurate IPA, part of speech, CEFR level (typically C1 or C2), and relative difficulty/frequency ranks.
+    - Provide a simple English definition and a detailed academic definition.
+    - Provide a precise Hindi meaning.
+    - Include advanced memory cues (mnemonic, visual imagination description, story trick, real association, funny trick).
+    - Include etymology details (rootWord, prefix, suffix, origin, rootMeaning, and other words sharing the same root).
+    - Provide easy, medium, and advanced synonyms.
+    - Include antonyms, word families, and 6 highly contextual context examples (simple, editorial, CAT reading comprehension style, business, academic, conversation).
+    - List exactly 5 natural, frequent word pairings (collocations).
+    - Highlight common mistakes (confusing words, incorrect vs correct sentence, explicit grammatical tips).
+    - Detail reading recognition cues (how major newspapers use it, typical phrases, subtext, author tone signal, connotation color).
+    - Choose an appropriate emotional tone and specify one of the valid categories.
+
+    Return a clean JSON array containing exactly 15 fully-profiled word objects following the response schema.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: wordSchema,
+        },
+      },
+    });
+
+    if (!response.text) {
+      throw new Error("Received empty response from daily list generator.");
+    }
+
+    const dailyList = JSON.parse(response.text.trim());
+    res.json(dailyList);
+  } catch (err: any) {
+    console.error("Gemini generate-daily-list failure:", err);
+    res.status(500).json({
+      error: "Failed to generate AI daily list. Details: " + (err.message || err),
+    });
+  }
+});
+
 // JSON Schema for Quiz Question
 const quizQuestionSchema = {
   type: Type.OBJECT,
