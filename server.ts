@@ -8,6 +8,9 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Create apiRouter to support both local /api and Netlify serverless functions prefix
+const apiRouter = express.Router();
+
 // Initialize server-side Gemini client
 const apiKey = process.env.GEMINI_API_KEY;
 const ai = apiKey
@@ -22,7 +25,7 @@ const ai = apiKey
   : null;
 
 // API Endpoint: Check backend and API status
-app.get("/api/health", (req, res) => {
+apiRouter.get("/health", (req, res) => {
   res.json({
     status: "ok",
     apiConfigured: !!apiKey,
@@ -144,7 +147,7 @@ const wordSchema = {
 };
 
 // API Endpoint: Profile any custom word (from search, Reading Mode, etc.)
-app.post("/api/gemini/analyze-word", async (req, res) => {
+const analyzeWordHandler = async (req: express.Request, res: express.Response) => {
   const { word } = req.body;
   if (!word || typeof word !== "string") {
     return res.status(400).json({ error: "A valid word string is required." });
@@ -186,7 +189,10 @@ app.post("/api/gemini/analyze-word", async (req, res) => {
       error: "Failed to profile word with AI. Details: " + (err.message || err),
     });
   }
-});
+};
+
+apiRouter.post("/gemini/analyze-word", analyzeWordHandler);
+apiRouter.post("/gemini/quick-lookup", analyzeWordHandler);
 
 // JSON Schema for Quiz Question
 const quizQuestionSchema = {
@@ -209,7 +215,7 @@ const quizListSchema = {
 };
 
 // API Endpoint: Generate customized quiz questions
-app.post("/api/gemini/generate-ai-quiz", async (req, res) => {
+apiRouter.post("/gemini/generate-ai-quiz", async (req, res) => {
   const { words, weakCategories } = req.body;
   if (!ai) {
     return res.status(500).json({
@@ -260,7 +266,7 @@ app.post("/api/gemini/generate-ai-quiz", async (req, res) => {
 });
 
 // API Endpoint: Compare confusing words or explain a concept
-app.post("/api/gemini/compare-words", async (req, res) => {
+apiRouter.post("/gemini/compare-words", async (req, res) => {
   const { wordA, wordB } = req.body;
   if (!wordA || !wordB) {
     return res.status(400).json({ error: "Both wordA and wordB are required." });
@@ -315,6 +321,10 @@ app.post("/api/gemini/compare-words", async (req, res) => {
   }
 });
 
+// Mount the api router to handle local requests under /api and Netlify requests under /.netlify/functions/api
+app.use("/api", apiRouter);
+app.use("/.netlify/functions/api", apiRouter);
+
 // Integrate Vite middleware in development or serve static assets in production
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
@@ -337,4 +347,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.NETLIFY) {
+  startServer();
+}
+
+export default app;
