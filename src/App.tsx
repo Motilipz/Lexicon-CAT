@@ -7,7 +7,7 @@ import QuizEngine from './components/QuizEngine';
 import ReadingMode from './components/ReadingMode';
 import WordDetailModal from './components/WordDetailModal';
 import AuthModal from './components/AuthModal';
-import { auth, db } from './lib/firebase';
+import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { Cloud, CloudOff, CloudLightning } from 'lucide-react';
 import { 
@@ -28,12 +28,21 @@ import {
   Star 
 } from 'lucide-react';
 
+const getLocalDateString = () => {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export default function App() {
   // --- STATE DECLARATIONS ---
   const [dictionary, setDictionary] = useState<Word[]>([]);
   const [progress, setProgress] = useState<{ [word: string]: UserWordProgress }>({});
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [stats, setStats] = useState<UserStats>({
     todayGoal: 15,
     currentStreak: 0,
@@ -121,7 +130,7 @@ export default function App() {
     // 4. Setup Daily 15 list
     const storedDailyWords = localStorage.getItem('cat_daily_words');
     const storedDailyDate = localStorage.getItem('cat_daily_date');
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getLocalDateString();
 
     if (storedDailyWords && storedDailyDate === todayStr) {
       try {
@@ -149,6 +158,7 @@ export default function App() {
       setFirebaseUser(u);
       if (u) {
         // Automatically fetch and synchronize latest cloud backup
+        const userDocPath = `users/${u.uid}`;
         try {
           const { doc, getDoc, collection, getDocs } = await import('firebase/firestore');
           const userDocRef = doc(db, 'users', u.uid);
@@ -162,11 +172,17 @@ export default function App() {
           }
 
           const progressMap: { [word: string]: UserWordProgress } = {};
+          const progressCollPath = `users/${u.uid}/progress`;
           const progressCollRef = collection(db, 'users', u.uid, 'progress');
-          const querySnap = await getDocs(progressCollRef);
-          querySnap.forEach((doc) => {
-            progressMap[doc.id] = doc.data() as UserWordProgress;
-          });
+          
+          try {
+            const querySnap = await getDocs(progressCollRef);
+            querySnap.forEach((doc) => {
+              progressMap[doc.id] = doc.data() as UserWordProgress;
+            });
+          } catch (collErr) {
+            handleFirestoreError(collErr, OperationType.LIST, progressCollPath);
+          }
 
           if (Object.keys(progressMap).length > 0) {
             setProgress(progressMap);
@@ -174,30 +190,59 @@ export default function App() {
           }
 
           // Trigger a silent rotation update based on newly merged records
-          const todayStr = new Date().toISOString().split('T')[0];
+          const todayStr = getLocalDateString();
           rollDailyList(dictionary, progressMap, cloudStats || stats, todayStr);
         } catch (e) {
           console.error("Failed to automatically synchronize cloud backup on boot:", e);
+          handleFirestoreError(e, OperationType.GET, userDocPath);
         }
       }
     });
     return () => unsubscribe();
   }, [dictionary]);
 
+  // Automatic midnight/date-change checking
+  useEffect(() => {
+    const checkDateChange = () => {
+      const currentLoadedDate = localStorage.getItem('cat_daily_date');
+      const todayStr = getLocalDateString();
+      if (currentLoadedDate && currentLoadedDate !== todayStr && dictionary.length > 0) {
+        console.log("Date change detected! Rotating the 15-word daily list.");
+        rollDailyList(dictionary, progress, stats, todayStr);
+      }
+    };
+
+    // Run check on focus/visibility change
+    window.addEventListener('focus', checkDateChange);
+    document.addEventListener('visibilitychange', checkDateChange);
+
+    // Also run a background check every 30 seconds
+    const intervalId = setInterval(checkDateChange, 30000);
+
+    return () => {
+      window.removeEventListener('focus', checkDateChange);
+      document.removeEventListener('visibilitychange', checkDateChange);
+      clearInterval(intervalId);
+    };
+  }, [dictionary, progress, stats]);
+
   // Cloud synchronization helpers
   const syncProgressToCloud = async (wordName: string, item: UserWordProgress) => {
     if (auth.currentUser) {
+      const docPath = `users/${auth.currentUser.uid}/progress/${wordName}`;
       try {
         const { doc, setDoc } = await import('firebase/firestore');
         await setDoc(doc(db, 'users', auth.currentUser.uid, 'progress', wordName), item);
       } catch (e) {
         console.error("Cloud progress sync failed:", e);
+        handleFirestoreError(e, OperationType.WRITE, docPath);
       }
     }
   };
 
   const syncStatsToCloud = async (newStats: UserStats) => {
     if (auth.currentUser) {
+      const docPath = `users/${auth.currentUser.uid}`;
       try {
         const { doc, setDoc } = await import('firebase/firestore');
         await setDoc(doc(db, 'users', auth.currentUser.uid), {
@@ -206,6 +251,7 @@ export default function App() {
         });
       } catch (e) {
         console.error("Cloud stats sync failed:", e);
+        handleFirestoreError(e, OperationType.WRITE, docPath);
       }
     }
   };
@@ -221,17 +267,16 @@ export default function App() {
     localStorage.setItem('cat_progress', JSON.stringify(fetchedProgress));
     
     // Rotate today's words list relative to the recovered profile
-    rollDailyList(dictionary, fetchedProgress, fetchedStats, new Date().toISOString().split('T')[0]);
+    rollDailyList(dictionary, fetchedProgress, fetchedStats, getLocalDateString());
   };
 
   const handleLogout = async () => {
-    if (confirm("Are you sure you want to log out from LEXICON CAT? Your progress will remain saved on this local browser session.")) {
-      try {
-        await signOut(auth);
-        setFirebaseUser(null);
-      } catch (e) {
-        console.error("Sign out failed:", e);
-      }
+    try {
+      await signOut(auth);
+      setFirebaseUser(null);
+      setShowLogoutConfirm(false);
+    } catch (e) {
+      console.error("Sign out failed:", e);
     }
   };
 
@@ -353,7 +398,7 @@ export default function App() {
     const updatedStats = {
       ...stats,
       totalWordsReviewed: totalStudied,
-      lastStudyDate: today.toISOString().split('T')[0]
+      lastStudyDate: getLocalDateString()
     };
     setStats(updatedStats);
     localStorage.setItem('cat_stats', JSON.stringify(updatedStats));
@@ -529,7 +574,7 @@ export default function App() {
       }
     } catch (e) {
       alert("AI generator experienced a minor connection lag. Defaulting to local rotation.");
-      rollDailyList(dictionary, progress, stats, new Date().toISOString().split('T')[0]);
+      rollDailyList(dictionary, progress, stats, getLocalDateString());
     } finally {
       setIsGeneratingDaily(false);
     }
@@ -552,7 +597,7 @@ export default function App() {
         localStorage.setItem('cat_dictionary', JSON.stringify(parsed.dictionary));
       }
       // Re-initialize lists
-      rollDailyList(parsed.dictionary || dictionary, parsed.progress || progress, parsed.stats || stats, new Date().toISOString().split('T')[0]);
+      rollDailyList(parsed.dictionary || dictionary, parsed.progress || progress, parsed.stats || stats, getLocalDateString());
     } catch (e) {
       alert("Import failed. Stale configuration file.");
     }
@@ -568,7 +613,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `CAT-Vocabulary-Backup-${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `CAT-Vocabulary-Backup-${getLocalDateString()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -676,12 +721,30 @@ export default function App() {
                 <span className="text-[10px] font-mono font-bold text-emerald-800 tracking-tight uppercase max-w-[80px] sm:max-w-[110px] truncate" title={firebaseUser.email || ""}>
                   Synced: {firebaseUser.displayName || firebaseUser.email?.split('@')[0]}
                 </span>
-                <button 
-                  onClick={handleLogout}
-                  className="text-[9px] font-mono font-bold text-zinc-500 hover:text-red-700 uppercase tracking-tight ml-1 hover:underline cursor-pointer"
-                >
-                  [Log out]
-                </button>
+                {showLogoutConfirm ? (
+                  <div className="flex items-center gap-1 ml-1 border-l border-emerald-200 pl-1.5">
+                    <span className="text-[9px] font-mono font-bold text-red-600 uppercase">Sure?</span>
+                    <button 
+                      onClick={handleLogout}
+                      className="text-[9px] font-mono font-bold text-red-700 hover:underline uppercase cursor-pointer"
+                    >
+                      [Yes]
+                    </button>
+                    <button 
+                      onClick={() => setShowLogoutConfirm(false)}
+                      className="text-[9px] font-mono font-bold text-zinc-500 hover:underline uppercase cursor-pointer"
+                    >
+                      [No]
+                    </button>
+                  </div>
+                ) : (
+                  <button 
+                    onClick={() => setShowLogoutConfirm(true)}
+                    className="text-[9px] font-mono font-bold text-zinc-500 hover:text-red-700 uppercase tracking-tight ml-1 hover:underline cursor-pointer"
+                  >
+                    [Log out]
+                  </button>
+                )}
               </div>
             ) : (
               <button 

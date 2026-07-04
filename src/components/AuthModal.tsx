@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { auth, db } from '../lib/firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
@@ -133,6 +133,8 @@ export default function AuthModal({
         setError('Invalid email or password. Please check your credentials.');
       } else if (err.code === 'auth/email-already-in-use') {
         setError('This email is already registered. Please login instead.');
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError('unauthorized-domain: This domain is not whitelisted in your Firebase Project. Please go to Firebase Console > Authentication > Settings > Authorized domains and add this Netlify/app domain to complete connection.');
       } else {
         setError(err.message || 'An error occurred during authentication.');
       }
@@ -190,6 +192,8 @@ export default function AuthModal({
         setError('Sign-in cancelled. The Google sign-in window was closed.');
       } else if (err.code === 'auth/cancelled-popup-request') {
         setError('A previous Google sign-in process was already pending. Please try again.');
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError('unauthorized-domain: This deployment domain is not whitelisted in your Firebase Project. Please go to Firebase Console > Authentication > Settings > Authorized domains and add this Netlify/app domain to allow Google Sign-In.');
       } else {
         setError(err.message || 'Failed to authenticate with Google.');
       }
@@ -202,6 +206,7 @@ export default function AuthModal({
 
   // Helper: Fetch stats & progress collection from Cloud
   const fetchCloudUserData = async (uid: string) => {
+    const userDocPath = `users/${uid}`;
     try {
       const userDocRef = doc(db, 'users', uid);
       const userSnap = await getDoc(userDocRef);
@@ -211,43 +216,53 @@ export default function AuthModal({
         stats = userSnap.data() as UserStats;
       }
 
-      // Fetch progress subcollection (Note: we can do it via a quick API proxy or Firestore)
-      // Since we are inside the client, we query directly:
       const progressMap: { [word: string]: UserWordProgress } = {};
-      
-      // Let's perform a getDocs of the user's progress subcollection.
-      // Import on demand to keep imports clean
       const { getDocs } = await import('firebase/firestore');
+      const progressCollPath = `users/${uid}/progress`;
       const progressCollRef = collection(db, 'users', uid, 'progress');
-      const querySnap = await getDocs(progressCollRef);
-      querySnap.forEach((doc) => {
-        progressMap[doc.id] = doc.data() as UserWordProgress;
-      });
+      
+      try {
+        const querySnap = await getDocs(progressCollRef);
+        querySnap.forEach((doc) => {
+          progressMap[doc.id] = doc.data() as UserWordProgress;
+        });
+      } catch (collErr) {
+        handleFirestoreError(collErr, OperationType.LIST, progressCollPath);
+      }
 
       return { stats, progress: progressMap };
     } catch (e) {
       console.error("Error fetching cloud user data:", e);
-      return { stats: null, progress: {} };
+      handleFirestoreError(e, OperationType.GET, userDocPath);
     }
   };
 
   // Helper: Save/Overwrite stats & progress subcollection to Cloud
   const saveUserDataToCloud = async (uid: string, stats: UserStats, progress: { [word: string]: UserWordProgress }) => {
-    const userDocRef = doc(db, 'users', uid);
-    await setDoc(userDocRef, {
-      ...stats,
-      updatedAt: new Date().toISOString()
-    });
+    const userDocPath = `users/${uid}`;
+    try {
+      const userDocRef = doc(db, 'users', uid);
+      await setDoc(userDocRef, {
+        ...stats,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, userDocPath);
+    }
 
     const progressWords = Object.keys(progress);
     if (progressWords.length > 0) {
-      // Use Firestore Write Batches to write multiple progress documents efficiently
+      const progressCollPath = `users/${uid}/progress`;
       const batch = writeBatch(db);
       progressWords.forEach((word) => {
         const docRef = doc(db, 'users', uid, 'progress', word);
         batch.set(docRef, progress[word]);
       });
-      await batch.commit();
+      try {
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, progressCollPath);
+      }
     }
   };
 
